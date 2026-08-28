@@ -34,7 +34,7 @@ function cleanDeepSeekReply(raw: string): string {
 }
 
 async function callDeepSeekR1(messages: { role: 'system' | 'user'; content: string }[]) {
-  if (!process.env.HF_TOKEN) {
+  if (!process.env.HUGGINGFACE_API_KEY) {
     throw new Error('Falta la variable HF_TOKEN en las variables de entorno');
   }
 
