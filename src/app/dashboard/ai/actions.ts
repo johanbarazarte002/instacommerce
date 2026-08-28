@@ -1,8 +1,13 @@
 'use server';
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY?.trim() || '';
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'deepseek/deepseek-chat:free'; // DeepSeek-V3 Gratuito
+import OpenAI from 'openai';
+
+const openai = new OpenAI({
+  baseURL: 'https://router.huggingface.co/v1',
+  apiKey: process.env.HUGGINGFACE_API_KEY || '',
+});
+
+const MODEL_NAME = 'deepseek-ai/DeepSeek-R1';
 
 interface GeneratePostInput {
   productName: string;
@@ -20,57 +25,52 @@ interface AuditBioInput {
   storeSlug: string;
 }
 
-function cleanJsonString(raw: string): string {
-  return raw
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
+// Limpiador de etiquetas de razonamiento <think> y bloques markdown
+function cleanDeepSeekReply(raw: string): string {
+  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  cleaned = cleaned.replace(/<think>[\s\S]*/gi, '');
+  cleaned = cleaned.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+  return cleaned.trim();
 }
 
-async function callOpenRouter(messages: { role: string; content: string }[]) {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error('Falta la variable OPENROUTER_API_KEY en las variables de entorno');
+async function callDeepSeekR1(messages: { role: 'system' | 'user'; content: string }[]) {
+  if (!process.env.HF_TOKEN) {
+    throw new Error('Falta la variable HF_TOKEN en las variables de entorno');
   }
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
-
-  const response = await fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      'HTTP-Referer': siteUrl,
-      'X-Title': 'InstaCommerce OS',
-    },
-    body: JSON.stringify({
-      model: MODEL_NAME,
-      messages,
-      temperature: 0.7,
-      max_tokens: 1200,
-    }),
+  const completion = await openai.chat.completions.create({
+    model: MODEL_NAME,
+    messages,
+    temperature: 0.6,
+    max_tokens: 1200,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter Error (${response.status}): ${errorText}`);
-  }
+  const rawReply = completion.choices[0]?.message?.content || '';
+  const cleaned = cleanDeepSeekReply(rawReply);
 
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content || '';
-  return cleanJsonString(content);
+  // Intentar parsear el JSON limpio
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Extractor de emergencia si el modelo agrega texto alrededor del JSON
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    throw new Error('No se pudo estructurar el JSON de respuesta');
+  }
 }
 
-// 1. Generador Contextual Especializado (POST vs REEL)
+// 1. Generador de Contenido Especializado (POST vs REEL)
 export async function generateInstagramPost(input: GeneratePostInput) {
   try {
     const isReel = input.contentType === 'REEL';
 
     const systemPrompt = isReel
-      ? `Eres un estratega de contenido viral para REELS de Instagram en LATAM.
+      ? `Eres un estratega senior de contenido viral para REELS de Instagram en LATAM.
 Tu objetivo es retener a la audiencia en los primeros 3 segundos y lograr que comenten '${input.triggerKeyword.toUpperCase()}'.
 
-Responde ÚNICAMENTE en formato JSON plano (sin texto introductorio ni markdown adicional) con esta estructura:
+INSTRUCCIÓN VITAL: Responde ÚNICAMENTE con un objeto JSON válido (sin explicaciones antes ni después):
 {
   "hookVisual": "Texto en pantalla de alto contraste para los primeros 3 segundos del Reel",
   "audioHook": "Qué decir en off en los primeros 3 segundos (voz del creador)",
@@ -80,9 +80,9 @@ Responde ÚNICAMENTE en formato JSON plano (sin texto introductorio ni markdown 
       : `Eres un copywriter senior especializado en POSTS ESTÁTICOS Y CARRUSELES de Instagram en LATAM.
 Tu objetivo es detener el scroll con un titular impactante, desarrollar los beneficios del producto y hacer que comenten '${input.triggerKeyword.toUpperCase()}'.
 
-Responde ÚNICAMENTE en formato JSON plano (sin texto introductorio ni markdown adicional) con esta estructura:
+INSTRUCCIÓN VITAL: Responde ÚNICAMENTE con un objeto JSON válido (sin explicaciones antes ni después):
 {
-  "headline": "Titular magnético (Primera línea del post antes del 'ver más' o portada)",
+  "headline": "Titular magnético (Primera línea del post antes del 'ver más' o texto para la portada)",
   "caption": "Texto estructurado persuasivo con viñetas, beneficios claros y llamada a la acción: 'Comenta ${input.triggerKeyword.toUpperCase()} para enviarte el catálogo directo'",
   "seoKeywords": ["palabra clave 1", "palabra clave local 2", "palabra clave 3", "palabra clave 4", "palabra clave 5"]
 }`;
@@ -94,12 +94,11 @@ Ciudad objetivo: ${input.targetCity}
 Beneficio clave: ${input.keyBenefit}
 Palabra clave para Auto-DM: ${input.triggerKeyword}`;
 
-    const rawResponse = await callOpenRouter([
+    const result = await callDeepSeekR1([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ]);
 
-    const result = JSON.parse(rawResponse);
     return { success: true, data: result, isReel };
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Error al generar contenido';
@@ -116,7 +115,7 @@ Línea 1: Propuesta de valor clara (Qué problema resuelves).
 Línea 2: Prueba social o diferenciador local (Ciudad/Envíos).
 Línea 3: Llamado a la acción claro hacia el Link-in-Bio: instacommerce.os/${input.storeSlug}
 
-Responde ÚNICAMENTE en formato JSON plano con esta estructura:
+INSTRUCCIÓN VITAL: Responde ÚNICAMENTE con un objeto JSON válido:
 {
   "score": 85,
   "diagnosis": "Diagnóstico breve de 2 líneas sobre los errores actuales de la bio.",
@@ -128,12 +127,11 @@ Responde ÚNICAMENTE en formato JSON plano con esta estructura:
 Nicho: ${input.niche}
 Ciudad: ${input.city}`;
 
-    const rawResponse = await callOpenRouter([
+    const result = await callDeepSeekR1([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ]);
 
-    const result = JSON.parse(rawResponse);
     return { success: true, data: result };
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Error al auditar perfil';
